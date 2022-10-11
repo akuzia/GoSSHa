@@ -192,3 +192,61 @@ func TestLimitConcurrency(t *testing.T) {
 		t.Fatalf("Too many servers responded: got %d, expected %d", answeredServers, maxAnsweredServers)
 	}
 }
+
+func TestFileUpload(t *testing.T) {
+	r := makeTestResult()
+
+	for _, srv := range testHosts {
+		r.hosts[srv.addr] = srv
+		r.hostsLeft[srv.addr] = struct{}{}
+	}
+
+	content := fmt.Sprintf("%d", time.Now().Unix())
+	targetPath := filepath.Join("/tmp", fmt.Sprintf("upload-%d.txt", time.Now().Unix()))
+	sourcePath := filepath.Join(os.TempDir(), fmt.Sprintf("upload-%d.txt", time.Now().Unix()))
+	os.WriteFile(sourcePath, []byte(content), 0666)
+
+	req := &ProxyRequest{
+		Action: "scp",
+		Source: sourcePath,
+		Target: targetPath,
+	}
+	for h := range r.hostsLeft {
+		req.Hosts = append(req.Hosts, h)
+	}
+
+	requestsChan <- req
+
+	waitReply(t, r, maxTimeout)
+
+	r = makeTestResult()
+	for _, srv := range testHosts {
+		r.hosts[srv.addr] = srv
+		r.hostsLeft[srv.addr] = struct{}{}
+	}
+
+	req = &ProxyRequest{
+		Action: "ssh",
+		Cmd:    "cat " + targetPath,
+	}
+	for h := range r.hostsLeft {
+		req.Hosts = append(req.Hosts, h)
+	}
+
+	requestsChan <- req
+
+	waitReply(t, r, maxTimeout)
+	for _, reply := range r.replies {
+		if reply.Stdout != content {
+			t.Fatalf("Expected '%s', got '%s' in stdout", content, reply.Stdout)
+		}
+
+		if reply.Stderr != "" {
+			t.Fatalf("Expected '', got '%s' in stderr", reply.Stderr)
+		}
+	}
+
+	if len(r.hostsLeft) != 0 {
+		t.Fatalf("Extra servers left: %#v", r.hostsLeft)
+	}
+}
