@@ -1,0 +1,33 @@
+version: '3'
+
+services:
+  remote1:
+    image: linuxserver/openssh-server
+    hostname: remote1
+    volumes:
+      - ./docker/test_key.pub:/ssh_keys/test_key
+    environment:
+      PUBLIC_KEY_DIR: /ssh_keys
+      USER_NAME: testuser
+  remote2:
+    image: linuxserver/openssh-server
+    hostname: remote2
+    volumes:
+      - ./docker/test_key.pub:/ssh_keys/test_key
+    environment:
+      PUBLIC_KEY_DIR: /ssh_keys
+      USER_NAME: testuser
+  remote3:
+    image: linuxserver/openssh-server
+    hostname: remote3
+    volumes:
+      - ./docker/test_key.pub:/ssh_keys/test_key
+    environment:
+      PUBLIC_KEY_DIR: /ssh_keys
+      USER_NAME: testuser
+
+  go:
+    image: golang:1.19
+    volumes:
+      - .:/gossha
+    working_dir: /gossha
