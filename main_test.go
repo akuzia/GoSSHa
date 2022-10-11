@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
 	"math"
 	"math/rand"
 	"os"
@@ -63,8 +62,8 @@ func TestMain(m *testing.M) {
 		tmpDir := filepath.Join(os.TempDir(), fmt.Sprintf("gossha-test-%d", rand.Int()))
 		sshDir := filepath.Join(tmpDir, ".ssh")
 		must(os.MkdirAll(sshDir, 0700), "Could not create temp dir")
-		must(ioutil.WriteFile(filepath.Join(sshDir, "id_rsa"), []byte(idRsa), 0600), "Could not write test private key")
-		must(ioutil.WriteFile(filepath.Join(sshDir, "id_rsa.pub"), []byte(idRsaPub), 0600), "Could not write test public key")
+		must(os.WriteFile(filepath.Join(sshDir, "id_rsa"), []byte(idRsa), 0600), "Could not write test private key")
+		must(os.WriteFile(filepath.Join(sshDir, "id_rsa.pub"), []byte(idRsaPub), 0600), "Could not write test public key")
 		defer os.RemoveAll(tmpDir)
 
 		os.Setenv("LOGNAME", testUserName)
@@ -133,8 +132,6 @@ func waitReply(t *testing.T, r *testResult, timeout time.Duration) {
 			t.Fatalf("Timed out, hosts left: %#v", r.hostsLeft)
 		}
 	}
-
-	panic("unreachable")
 }
 
 func makeProxyRequest(timeout time.Duration) *ProxyRequest {

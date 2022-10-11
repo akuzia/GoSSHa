@@ -7,7 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"net"
 	"os"
@@ -88,11 +88,6 @@ type (
 		err      error
 	}
 
-	ScpResult struct {
-		hostname string
-		err      error
-	}
-
 	ProxyRequest struct {
 		Action        string
 		Password      string // password for private key (only for Action == "password")
@@ -134,12 +129,6 @@ type (
 		InitializeComplete bool
 	}
 
-	// executionRequest is used to send requests to the execution pool.
-	executionRequest struct {
-		Func func(string) *SshResult
-		Host string
-	}
-
 	DisableReportConnectedHosts bool
 	EnableReportConnectedHosts  bool
 )
@@ -177,7 +166,7 @@ func makeConfig() (config *ssh.ClientConfig, agentUnixSock net.Conn) {
 
 			if err != nil {
 				netErr := err.(net.Error)
-				if netErr.Temporary() {
+				if netErr.Timeout() {
 					time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
 					continue
 				}
@@ -215,7 +204,7 @@ func makeSigner(keyname string) (signer ssh.Signer, err error) {
 	}
 	defer fp.Close()
 
-	buf, err := ioutil.ReadAll(fp)
+	buf, err := io.ReadAll(fp)
 	if err != nil {
 		reportErrorToUser("Could not read " + keyname + ": " + err.Error())
 		return
@@ -227,7 +216,7 @@ func makeSigner(keyname string) (signer ssh.Signer, err error) {
 			out   []byte
 		)
 
-		tmpfp, err = ioutil.TempFile("", "key")
+		tmpfp, err = os.CreateTemp("", "key")
 		if err != nil {
 			reportErrorToUser("Could not create temporary file: " + err.Error())
 			return
@@ -272,7 +261,7 @@ func makeSigner(keyname string) (signer ssh.Signer, err error) {
 			return
 		}
 
-		buf, err = ioutil.ReadAll(tmpfp)
+		buf, err = io.ReadAll(tmpfp)
 		if err != nil {
 			return
 		}
@@ -460,9 +449,7 @@ func initialize(internalInput bool) {
 	keys = []string{os.Getenv("HOME") + "/.ssh/id_rsa", os.Getenv("HOME") + "/.ssh/id_dsa", os.Getenv("HOME") + "/.ssh/id_ecdsa"}
 
 	if pubKey != "" {
-		if strings.HasSuffix(pubKey, ".pub") {
-			pubKey = strings.TrimSuffix(pubKey, ".pub")
-		}
+		pubKey = strings.TrimSuffix(pubKey, ".pub")
 
 		keys = append(keys, pubKey)
 	}
@@ -579,7 +566,7 @@ func getExecFunc(msg *ProxyRequest) func(string) *SshResult {
 
 		defer fp.Close()
 
-		contents, err := ioutil.ReadAll(fp)
+		contents, err := io.ReadAll(fp)
 		if err != nil {
 			reportCriticalErrorToUser("Cannot read " + msg.Source + " contents: " + err.Error())
 			return nil
