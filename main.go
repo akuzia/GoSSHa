@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -14,20 +15,16 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
+	scp "github.com/bramvdbogaerde/go-scp"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
 
 const (
 	defaultTimeout             = 30000 // default timeout for operations (in milliseconds)
-	chunkSize                  = 65536 // chunk size in bytes for scp
-	throughputSleepInterval    = 100   // how many milliseconds to sleep between writing "tickets" to channel in maxThroughputThread
-	minChunks                  = 10    // minimum allowed count of chunks to be sent per sleep interval
-	minThroughput              = chunkSize * minChunks * (1000 / throughputSleepInterval)
-	maxOpensshAgentConnections = 128 // default connection backlog for openssh
+	maxOpensshAgentConnections = 128   // default connection backlog for openssh
 )
 
 var (
@@ -36,10 +33,6 @@ var (
 	keys         []string
 	repliesChan  = make(chan interface{})
 	requestsChan = make(chan *ProxyRequest)
-
-	maxThroughputChan = make(chan bool, minChunks) // channel that is used for throughput limiting in scp
-
-	maxThroughput uint64 // max throughput (for scp) in bytes per second
 
 	agentConnChan      = make(chan chan bool) // channel for getting "ticket" for new agent connection
 	agentConnFreeChan  = make(chan bool, 10)  // channel for freeing connections
@@ -89,14 +82,13 @@ type (
 	}
 
 	ProxyRequest struct {
-		Action        string
-		Password      string // password for private key (only for Action == "password")
-		Cmd           string // command to execute (only for Action == "ssh")
-		Source        string // source file to copy (only for Action == "scp")
-		Target        string // target file (only for Action == "scp")
-		Hosts         []string
-		Timeout       uint64 // timeout (in milliseconds), default is defaultTimeout
-		MaxThroughput uint64 // max throughput (for scp) in bytes per second, default is no limit
+		Action   string
+		Password string // password for private key (only for Action == "password")
+		Cmd      string // command to execute (only for Action == "ssh")
+		Source   string // source file to copy (only for Action == "scp")
+		Target   string // target file (only for Action == "scp")
+		Hosts    []string
+		Timeout  uint64 // timeout (in milliseconds), default is defaultTimeout
 	}
 
 	Reply struct {
@@ -328,60 +320,30 @@ func getConnection(hostname string) (conn *ssh.Client, err error) {
 	return
 }
 
-func uploadFile(target string, contents []byte, hostname string) (stdout, stderr string, err error) {
-	conn, err := getConnection(hostname)
+func uploadFile(target, source string, hostname string) (err error) {
+	clientConfig, _ := makeConfig()
+	client := scp.NewClient(hostname, clientConfig)
+	if err := client.Connect(); err != nil {
+		return err
+	}
+	defer client.Close()
+
+	file, err := os.Open(source)
 	if err != nil {
-		return
+		return err
 	}
+	defer file.Close()
 
-	session, err := conn.NewSession()
+	stat, err := file.Stat()
 	if err != nil {
-		return
-	}
-	if disconnectAfterUse {
-		defer connectedHosts.Close(hostname)
-	}
-	defer session.Close()
-
-	cmd := "cat >'" + strings.Replace(target, "'", "'\\''", -1) + "'"
-	stdinPipe, err := session.StdinPipe()
-	if err != nil {
-		return
+		return err
 	}
 
-	var stdoutBuf bytes.Buffer
-	var stderrBuf bytes.Buffer
-	session.Stdout = &stdoutBuf
-	session.Stderr = &stderrBuf
-
-	err = session.Start(cmd)
-	if err != nil {
-		return
+	if err := client.Copy(context.Background(), bufio.NewReader(file), target, "0655", stat.Size()); err != nil {
+		return err
 	}
 
-	for start, maxEnd := 0, len(contents); start < maxEnd; start += chunkSize {
-		<-maxThroughputChan
-
-		end := start + chunkSize
-		if end > maxEnd {
-			end = maxEnd
-		}
-		_, err = stdinPipe.Write(contents[start:end])
-		if err != nil {
-			return
-		}
-	}
-
-	err = stdinPipe.Close()
-	if err != nil {
-		return
-	}
-
-	err = session.Wait()
-	stdout = stdoutBuf.String()
-	stderr = stderrBuf.String()
-
-	return
+	return nil
 }
 
 func executeCmd(cmd string, hostname string) (stdout, stderr string, err error) {
@@ -465,8 +427,6 @@ func initialize(internalInput bool) {
 		go jsonReplierThread()
 	}
 
-	go maxThroughputThread()
-
 	makeSigners()
 }
 
@@ -509,27 +469,6 @@ func sendProxyReply(response interface{}) {
 	repliesChan <- response
 }
 
-func maxThroughputThread() {
-	for {
-		throughput := atomic.LoadUint64(&maxThroughput)
-
-		// how many chunks can be sent in specified time interval
-		chunks := throughput / chunkSize * throughputSleepInterval / 1000
-
-		if chunks < minChunks {
-			chunks = minChunks
-		}
-
-		for i := uint64(0); i < chunks; i++ {
-			maxThroughputChan <- true
-		}
-
-		if throughput > 0 {
-			time.Sleep(throughputSleepInterval * time.Millisecond)
-		}
-	}
-}
-
 func getExecFunc(msg *ProxyRequest) func(string) *SshResult {
 	if msg.Action == "ssh" {
 		if msg.Cmd == "" {
@@ -552,29 +491,15 @@ func getExecFunc(msg *ProxyRequest) func(string) *SshResult {
 			return nil
 		}
 
-		if msg.MaxThroughput > 0 && msg.MaxThroughput < minThroughput {
-			reportErrorToUser(fmt.Sprint("Minimal supported throughput is ", minThroughput, " Bps"))
-		}
-
-		atomic.StoreUint64(&msg.MaxThroughput, maxThroughput)
-
-		fp, err := os.Open(msg.Source)
+		_, err := os.Stat(msg.Source)
 		if err != nil {
 			reportCriticalErrorToUser(err.Error())
 			return nil
 		}
 
-		defer fp.Close()
-
-		contents, err := io.ReadAll(fp)
-		if err != nil {
-			reportCriticalErrorToUser("Cannot read " + msg.Source + " contents: " + err.Error())
-			return nil
-		}
-
 		return func(hostname string) *SshResult {
-			stdout, stderr, err := uploadFile(msg.Target, contents, hostname)
-			return &SshResult{hostname: hostname, stdout: stdout, stderr: stderr, err: err}
+			err := uploadFile(msg.Target, msg.Source, hostname)
+			return &SshResult{hostname: hostname, stdout: "", stderr: "", err: err}
 		}
 	}
 
