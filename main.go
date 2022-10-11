@@ -31,6 +31,7 @@ const (
 )
 
 var (
+	version      = "devel"
 	user         string
 	signers      []ssh.Signer
 	keys         []string
@@ -438,6 +439,12 @@ func initialize(internalInput bool) {
 		pubKey              string
 		maxAgentConnections uint64
 	)
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stdout, "Usage of GoSSHa %s \n\n", version)
+
+		flag.PrintDefaults()
+	}
 
 	flag.StringVar(&pubKey, "i", "", "Optional path to public key to use")
 	flag.StringVar(&user, "l", os.Getenv("LOGNAME"), "Optional login name")
