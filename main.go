@@ -282,6 +282,14 @@ func makeSigners() {
 	}
 }
 
+func getHostnameWithPort(hostname string) (string, string) {
+	if str := strings.SplitN(hostname, ":", 2); len(str) == 2 {
+		return str[0], str[1]
+	}
+
+	return hostname, "22"
+}
+
 func getConnection(hostname string) (conn *ssh.Client, err error) {
 	conn, ok := connectedHosts.Get(hostname)
 	if ok {
@@ -302,12 +310,7 @@ func getConnection(hostname string) (conn *ssh.Client, err error) {
 
 	defer releaseAgent()
 
-	port := "22"
-	str := strings.SplitN(hostname, ":", 2)
-	if len(str) == 2 {
-		hostname = str[0]
-		port = str[1]
-	}
+	hostname, port := getHostnameWithPort(hostname)
 
 	conn, err = ssh.Dial("tcp", hostname+":"+port, conf)
 	if err != nil {
@@ -321,8 +324,9 @@ func getConnection(hostname string) (conn *ssh.Client, err error) {
 }
 
 func uploadFile(target, source string, hostname string) (err error) {
+	hostname, port := getHostnameWithPort(hostname)
 	clientConfig, _ := makeConfig()
-	client := scp.NewClient(hostname, clientConfig)
+	client := scp.NewClient(fmt.Sprintf("%s:%s", hostname, port), clientConfig)
 	if err := client.Connect(); err != nil {
 		return err
 	}
