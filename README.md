@@ -1,16 +1,13 @@
-GoSSHa: Go SSH agent
-====================
+# GoSSHa: Go SSH agent
 
-Ssh client that supports command execution and file upload on multiple servers (designed to handle thousands of parallel SSH connections). GoSSHa supports SSH authentication using private keys (encrypted keys are supported using external call to *ssh-keygen*) and ssh-agent, implemented using go.crypto/ssh.
+Ssh client that supports command execution and file upload on multiple servers (designed to handle thousands of parallel SSH connections). GoSSHa supports SSH authentication using private keys (encrypted keys are supported using external call to _ssh-keygen_) and ssh-agent, implemented using go.crypto/ssh.
 
-Installation
-============
+# Installation
 
 1. Install go (programming language) at http://golang.org/
 2. Install GoSSHa: `$ go get github.com/YuriyNasretdinov/GoSSHa`
 
-Usage
-=====
+# Usage
 
 GoSSHa is not designed to be used directly by end users, but rather serve as a lightweight proxy between your application (GUI or CLI) and thousands of SSH connections to remote servers.
 
@@ -75,6 +72,8 @@ In order to execute a certain `<command>` on remote servers (e.g. `<server1>` an
 
 You can also set `"Timeout": <timeout>` in milliseconds (default is 30000 ms)
 
+GoSSHa drains command output from SSH as a stream, but it only keeps a bounded amount of stdout and stderr in memory because replies are still returned as a single JSON object per host. By default the first 128m of each stream are retained; if a stream grows beyond that limit, the command reply is marked as failed and contains the captured prefix together with an error describing which limit was exceeded. You can change this cap with the `-o` flag.
+
 While connections to hosts are estabilished and command results are ready you will receive one of the following messages:
 
 1. Error messages: `{"Type":"UserError","IsCritical":false,"ErrorMsg":"<error-message>"}`
@@ -109,7 +108,6 @@ You will receive progress and results in exactly the same format as for command 
 
 **Note:** Source file contents are fully read in memory, so you should not upload very large files using this command. If you really need to upload huge file to a lot of hosts, try using bittorrent or UFTP, as they provide much higher network effeciency than SSH.
 
-Source code modification
-========================
+# Source code modification
 
 GoSSHa is pretty simple (all it's code is contained in a single file with 500 SLOC) and it should be pretty easy to add new functionality or alter some of it's behaviour. We are always open for pull requests and feature requests as well.

@@ -117,6 +117,12 @@ func makeProxyRequest(timeout time.Duration) *ProxyRequest {
 	}
 }
 
+func makeProxyRequestWithCmd(timeout time.Duration, cmd string) *ProxyRequest {
+	req := makeProxyRequest(timeout)
+	req.Cmd = cmd
+	return req
+}
+
 func checkSuccess(t *testing.T, r *testResult) {
 	for _, reply := range r.replies {
 		srv := r.hosts[reply.Hostname]
@@ -248,5 +254,50 @@ func TestFileUpload(t *testing.T) {
 
 	if len(r.hostsLeft) != 0 {
 		t.Fatalf("Extra servers left: %#v", r.hostsLeft)
+	}
+}
+
+func TestLimitCommandOutput(t *testing.T) {
+	prevLimit := maxCommandOutput
+	maxCommandOutput = 64
+	defer func() {
+		maxCommandOutput = prevLimit
+	}()
+
+	r := makeTestResult()
+	srv := testHosts[0]
+	r.hosts[srv.addr] = srv
+	r.hostsLeft[srv.addr] = struct{}{}
+
+	req := makeProxyRequestWithCmd(maxTimeout/2, "sh -c 'i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); done'")
+	req.Hosts = append(req.Hosts, srv.addr)
+
+	requestsChan <- req
+
+	waitReply(t, r, maxTimeout)
+
+	reply := r.replies[srv.addr]
+	if reply == nil {
+		t.Fatalf("Expected reply for %s", srv.addr)
+	}
+
+	if reply.Success {
+		t.Fatalf("Expected command to fail when output exceeds limit")
+	}
+
+	if len(reply.Stdout) != int(maxCommandOutput) {
+		t.Fatalf("Expected stdout length %d, got %d", maxCommandOutput, len(reply.Stdout))
+	}
+
+	if reply.Stderr != "" {
+		t.Fatalf("Expected empty stderr, got %q", reply.Stderr)
+	}
+
+	if !strings.Contains(reply.ErrMsg, "command output limit exceeded") {
+		t.Fatalf("Expected output limit error, got %q", reply.ErrMsg)
+	}
+
+	if !strings.Contains(reply.ErrMsg, "stdout exceeded 64 bytes") {
+		t.Fatalf("Expected stdout limit details, got %q", reply.ErrMsg)
 	}
 }

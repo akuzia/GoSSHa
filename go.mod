@@ -1,10 +1,10 @@
 module github.com/akuzia/GoSSHa
 
-go 1.19
+go 1.26
 
-require golang.org/x/crypto v0.0.0-20221010152910-d6f0a8c073c2
+require golang.org/x/crypto v0.49.0
 
 require (
-	github.com/bramvdbogaerde/go-scp v1.2.0
-	golang.org/x/sys v0.0.0-20210615035016-665e8c7367d1 // indirect
+	github.com/bramvdbogaerde/go-scp v1.6.0
+	golang.org/x/sys v0.42.0 // indirect
 )

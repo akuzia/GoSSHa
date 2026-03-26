@@ -23,8 +23,9 @@ import (
 )
 
 const (
-	defaultTimeout             = 30000 // default timeout for operations (in milliseconds)
-	maxOpensshAgentConnections = 128   // default connection backlog for openssh
+	defaultTimeout             = 30000             // default timeout for operations (in milliseconds)
+	maxOpensshAgentConnections = 128               // default connection backlog for openssh
+	defaultMaxCommandOutput    = 128 * 1024 * 1024 // default command output buffer limit
 )
 
 var (
@@ -39,10 +40,57 @@ var (
 	agentConnFreeChan  = make(chan bool, 10)  // channel for freeing connections
 	sshAuthSock        string
 	maxConnections     uint64 // max concurrent ssh connections
+	maxCommandOutput   uint64 // max captured command output per stream in bytes
 	disconnectAfterUse bool   // close connection after each action
 
 	connectedHosts = connHostsMap{v: make(map[string]*ssh.Client)}
 )
+
+type limitedOutputBuffer struct {
+	limit     uint64
+	total     uint64
+	truncated bool
+	buf       bytes.Buffer
+}
+
+func (b *limitedOutputBuffer) Write(p []byte) (int, error) {
+	b.total += uint64(len(p))
+
+	if b.limit > uint64(b.buf.Len()) {
+		remaining := int(b.limit - uint64(b.buf.Len()))
+		if remaining > len(p) {
+			remaining = len(p)
+		}
+
+		if remaining > 0 {
+			if _, err := b.buf.Write(p[:remaining]); err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	if uint64(b.buf.Len()) < b.total {
+		b.truncated = true
+	}
+
+	return len(p), nil
+}
+
+func (b *limitedOutputBuffer) String() string {
+	return b.buf.String()
+}
+
+func (b *limitedOutputBuffer) Overflowed() bool {
+	return b.truncated
+}
+
+func (b *limitedOutputBuffer) Limit() uint64 {
+	return b.limit
+}
+
+func (b *limitedOutputBuffer) Total() uint64 {
+	return b.total
+}
 
 type connHostsMap struct {
 	mu sync.Mutex
@@ -351,6 +399,29 @@ func uploadFile(target, source string, hostname string) (err error) {
 	return nil
 }
 
+func drainCommandOutput(src io.Reader, dst *limitedOutputBuffer, errCh chan<- error) {
+	_, err := io.Copy(dst, src)
+	errCh <- err
+}
+
+func outputLimitError(stdout, stderr *limitedOutputBuffer) error {
+	var exceeded []string
+
+	if stdout.Overflowed() {
+		exceeded = append(exceeded, fmt.Sprintf("stdout exceeded %d bytes (received %d bytes)", stdout.Limit(), stdout.Total()))
+	}
+
+	if stderr.Overflowed() {
+		exceeded = append(exceeded, fmt.Sprintf("stderr exceeded %d bytes (received %d bytes)", stderr.Limit(), stderr.Total()))
+	}
+
+	if len(exceeded) == 0 {
+		return nil
+	}
+
+	return errors.New("command output limit exceeded: " + strings.Join(exceeded, "; "))
+}
+
 func executeCmd(cmd string, hostname string) (stdout, stderr string, err error) {
 	conn, err := getConnection(hostname)
 	if err != nil {
@@ -366,14 +437,39 @@ func executeCmd(cmd string, hostname string) (stdout, stderr string, err error) 
 	}
 	defer session.Close()
 
-	var stdoutBuf bytes.Buffer
-	var stderrBuf bytes.Buffer
-	session.Stdout = &stdoutBuf
-	session.Stderr = &stderrBuf
-	err = session.Run(cmd)
+	stdoutPipe, err := session.StdoutPipe()
+	if err != nil {
+		return
+	}
+
+	stderrPipe, err := session.StderrPipe()
+	if err != nil {
+		return
+	}
+
+	err = session.Start(cmd)
+	if err != nil {
+		return
+	}
+
+	stdoutBuf := &limitedOutputBuffer{limit: maxCommandOutput}
+	stderrBuf := &limitedOutputBuffer{limit: maxCommandOutput}
+	copyErrCh := make(chan error, 2)
+
+	go drainCommandOutput(stdoutPipe, stdoutBuf, copyErrCh)
+	go drainCommandOutput(stderrPipe, stderrBuf, copyErrCh)
+
+	waitErr := session.Wait()
+	for i := 0; i < 2; i++ {
+		copyErr := <-copyErrCh
+		if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+			err = errors.Join(err, copyErr)
+		}
+	}
 
 	stdout = stdoutBuf.String()
 	stderr = stderrBuf.String()
+	err = errors.Join(err, waitErr, outputLimitError(stdoutBuf, stderrBuf))
 
 	return
 }
@@ -417,6 +513,7 @@ func initialize(internalInput bool) {
 	flag.Uint64Var(&maxAgentConnections, "c", maxOpensshAgentConnections, "Maximum simultaneous ssh-agent connections")
 	flag.BoolVar(&disconnectAfterUse, "d", false, "Disconnect after each action")
 	flag.Uint64Var(&maxConnections, "m", 0, "Maximum simultaneous connections")
+	flag.Uint64Var(&maxCommandOutput, "o", defaultMaxCommandOutput, "Maximum captured command output per stream in bytes")
 	flag.Parse()
 
 	keys = []string{os.Getenv("HOME") + "/.ssh/id_rsa", os.Getenv("HOME") + "/.ssh/id_dsa", os.Getenv("HOME") + "/.ssh/id_ecdsa"}
@@ -481,7 +578,8 @@ func sendProxyReply(response interface{}) {
 }
 
 func getExecFunc(msg *ProxyRequest) func(string) *SshResult {
-	if msg.Action == "ssh" {
+	switch msg.Action {
+	case "ssh":
 		if msg.Cmd == "" {
 			reportCriticalErrorToUser("Empty 'Cmd'")
 			return nil
@@ -491,7 +589,8 @@ func getExecFunc(msg *ProxyRequest) func(string) *SshResult {
 			stdout, stderr, err := executeCmd(msg.Cmd, hostname)
 			return &SshResult{hostname: hostname, stdout: stdout, stderr: stderr, err: err}
 		}
-	} else if msg.Action == "scp" {
+
+	case "scp":
 		if msg.Source == "" {
 			reportCriticalErrorToUser("Empty 'Source'")
 			return nil
@@ -512,9 +611,10 @@ func getExecFunc(msg *ProxyRequest) func(string) *SshResult {
 			err := uploadFile(msg.Target, msg.Source, hostname)
 			return &SshResult{hostname: hostname, stdout: "", stderr: "", err: err}
 		}
+	default:
+		reportCriticalErrorToUser(fmt.Sprintf("Unsupported action: %s", msg.Action))
 	}
 
-	reportCriticalErrorToUser(fmt.Sprintf("Unsupported action: %s", msg.Action))
 	return nil
 }
 
